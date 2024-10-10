@@ -6,7 +6,6 @@
     <title>{{.RelayName}} - Subkey Management</title>
     <script src="https://unpkg.com/nostr-tools/lib/nostr.bundle.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -32,6 +31,13 @@
             border-radius: 4px;
             padding: 15px;
             margin-bottom: 20px;
+            cursor: pointer;
+        }
+        .card-details {
+            display: none;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #ddd;
         }
         .input, .button {
             width: 100%;
@@ -49,39 +55,28 @@
         .button:hover {
             background-color: #2980b9;
         }
-        .subkey-list {
-            margin-top: 20px;
-            overflow-x: auto;
+        .button.delete {
+            background-color: #e74c3c;
         }
-        .subkey-table {
-            width: 100%;
-            border-collapse: collapse;
+        .button.delete:hover {
+            background-color: #c0392b;
         }
-        .subkey-table th, .subkey-table td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
+        .button.update {
+            background-color: #2ecc71;
         }
-        .subkey-table th {
-            background-color: #f2f2f2;
+        .button.update:hover {
+            background-color: #27ae60;
         }
         .qr-code {
             display: none;
             margin-top: 10px;
         }
         .show-qr, .show-qr-priv, .hide-qr {
-            background-color: #2ecc71;
-            margin-left: 10px;
+            background-color: #95a5a6;
+            margin-right: 5px;
         }
-        .hide-qr, .hide-qr-priv {
+        .hide-qr {
             display: none;
-        }
-        .checkbox-column {
-            width: 30px;
-        }
-        .key-column {
-            max-width: 200px;
-            word-break: break-all;
         }
     </style>
 </head>
@@ -92,7 +87,7 @@
         <div class="card">
             <h2>Relay Information</h2>
             <p>{{.RelayDescription}}</p>
-            <p><strong>Connect to this relay using:</strong> <code>ws://{{.Host}}/relay</code></p>
+            <p><strong>Connect to this relay using:</strong> <code>ws://{{.Host}}/</code></p>
         </div>
 
         <div class="card" id="login-section">
@@ -100,30 +95,21 @@
             <button id="login-button" class="button">Login with Nostr</button>
         </div>
 
-        <div class="card" id="subkey-management" style="display: none;">
+        <div id="subkey-management" style="display: none;">
             <h2>Manage Subkeys</h2>
-            <form id="add-subkey-form">
-                <input type="text" name="privkey" placeholder="Private Key (nsec or hex)" class="input" required>
-                <input type="text" name="allowed_kinds" placeholder="Allowed Kinds (comma-separated)" class="input" required>
-                <button type="submit" class="button">Add Subkey</button>
-            </form>
+            <div class="card">
+                <h3>Add New Subkey</h3>
+                <form id="add-subkey-form">
+                    <input type="text" name="name" placeholder="Subkey Name" class="input" required>
+                    <input type="text" name="privkey" placeholder="Private Key (nsec or hex)" class="input" required>
+                    <input type="text" name="allowed_kinds" placeholder="Allowed Kinds (comma-separated)" class="input" required>
+                    <button type="submit" class="button">Add Subkey</button>
+                </form>
+                <button id="generate-subkey-backend" class="button">Generate Random Subkey (Backend)</button>
+            </div>  
 
-            <div id="subkey-list" class="subkey-list">
-                <table class="subkey-table">
-                    <thead>
-                        <tr>
-                            <th class="checkbox-column"><input type="checkbox" id="select-all"></th>
-                            <th>Public Key</th>
-                            <th>Private Key</th>
-                            <th>Allowed Kinds</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="subkey-table-body">
-                        <!-- Subkeys will be loaded here -->
-                    </tbody>
-                </table>
-                <button id="delete-selected" class="button" style="display: none;">Delete Selected</button>
+            <div id="subkey-list">
+                <!-- Subkeys will be loaded here -->
             </div>
         </div>
     </div>
@@ -156,6 +142,27 @@
         return btoa(JSON.stringify(signedEvent));
     }
 
+    async function generateSubkeyBackend() {
+        console.log("Generating subkey on the backend...");
+        const token = await getAuthToken('/api/subkey/generate', 'POST');
+        const response = await fetch('/api/subkey/generate', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Nostr ' + token
+            }
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            document.querySelector('#add-subkey-form input[name="name"]').value = result.name;
+            document.querySelector('#add-subkey-form input[name="privkey"]').value = result.privkey;
+            document.querySelector('#add-subkey-form input[name="allowed_kinds"]').value = result.allowed_kinds;
+        } else {
+            alert('Failed to generate subkey on the backend');
+        }
+    }
+
+
     async function login() {
         try {
             const token = await getAuthToken('/api/login', 'POST');
@@ -187,34 +194,51 @@
             }
         });
         const subkeys = await response.json();
-        const subkeyTableBody = document.getElementById('subkey-table-body');
-        subkeyTableBody.innerHTML = '';
+        const subkeyList = document.getElementById('subkey-list');
+        subkeyList.innerHTML = '';
         subkeys.forEach(subkey => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td><input type="checkbox" class="subkey-checkbox" data-pubkey="${subkey.pubkey}"></td>
-                <td class="key-column">
-                    ${subkey.pubkey}
-                    <br>
-                    <button class="show-qr" onclick="showQR(this, '${subkey.pubkey}')">Show QR</button>
-                    <button class="hide-qr" onclick="hideQR(this)">Hide QR</button>
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.innerHTML = `
+                <h3>${subkey.name || 'Unnamed Subkey'}</h3>
+                <p>NPUB: ${subkey.npub}</p>
+                <p>Created: ${new Date(subkey.created_at * 1000).toLocaleString()}</p>
+                <p>Updated: ${new Date(subkey.updated_at * 1000).toLocaleString()}</p>
+                <button class="button update" onclick="toggleDetails(this)">Show Details</button>
+                <button class="button delete" onclick="deleteSubkey('${subkey.pubkey}')">Delete</button>
+                <div class="card-details">
+                    <p><strong>Public Key (hex):</strong> ${subkey.pubkey}</p>
+                    <p><strong>Private Key (nsec):</strong> ${subkey.nsec}</p>
+                    <p><strong>Private Key (hex):</strong> ${subkey.privkey}</p>
+                    <p><strong>Allowed Kinds:</strong> <span class="allowed-kinds">${subkey.allowed_kinds}</span></p>
+                    <form onsubmit="updateSubkeyKinds(event, '${subkey.pubkey}')">
+                        <input type="text" name="allowed_kinds" placeholder="New Allowed Kinds" class="input" required>
+                        <button type="submit" class="button update">Update Kinds</button>
+                    </form>
+                    <form onsubmit="updateSubkeyName(event, '${subkey.pubkey}')">
+                        <input type="text" name="name" placeholder="New Subkey Name" class="input" required>
+                        <button type="submit" class="button update">Update Name</button>
+                    </form>
+                    <button class="button show-qr" onclick="showQR(this, '${subkey.npub}')">Show Public Key QR</button>
+                    <button class="button hide-qr" onclick="hideQR(this)">Hide QR</button>
                     <div class="qr-code"></div>
-                </td>
-                <td class="key-column">
-                    ${subkey.privkey}
-                    <br>
-                    <button class="show-qr-priv" onclick="showQR(this, '${subkey.privkey}')">Show QR</button>
-                    <button class="hide-qr-priv" onclick="hideQR(this)">Hide QR</button>
-                    <div class="qr-code"></div>    
-                </td>
-                <td>${subkey.allowed_kinds}</td>
-                <td>
-                    <button onclick="deleteSubkey('${subkey.pubkey}')" class="button delete">Delete</button>
-                </td>
+                    <button class="button show-qr-priv" onclick="showQR(this, '${subkey.nsec}')">Show Private Key QR</button>
+                    <button class="button hide-qr" onclick="hideQR(this)">Hide QR</button>
+                    <div class="qr-code"></div>
+                </div>
             `;
-            subkeyTableBody.appendChild(row);
+            subkeyList.appendChild(card);
         });
-        updateDeleteSelectedButton();
+    }
+    function toggleDetails(button) {
+        const details = button.nextElementSibling.nextElementSibling;
+        if (details.style.display === 'none' || details.style.display === '') {
+            details.style.display = 'block';
+            button.textContent = 'Hide Details';
+        } else {
+            details.style.display = 'none';
+            button.textContent = 'Show Details';
+        }
     }
 
     function showQR(button, pubkey) {
@@ -264,12 +288,10 @@
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        let privkey = formData.get('privkey').trim();
-        const allowedKinds = formData.get('allowed_kinds').split(',').map(k => k.trim()).join(',');
-        
         const subkey = {
-            privkey: privkey,
-            allowed_kinds: allowedKinds
+            name: formData.get('name'),
+            privkey: formData.get('privkey').trim(),
+            allowed_kinds: formData.get('allowed_kinds').split(',').map(k => k.trim()).join(',')
         };
 
         const token = await getAuthToken('/api/subkey', 'POST');
@@ -293,30 +315,62 @@
         }
     }
 
+    async function updateSubkeyKinds(event, pubkey) {
+        event.preventDefault();
+        const form = event.target;
+        const newAllowedKinds = form.allowed_kinds.value;
+
+        const token = await getAuthToken(`/api/subkey/${pubkey}/kinds`, 'PUT');
+        const response = await fetch(`/api/subkey/${pubkey}/kinds`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Nostr ' + token
+            },
+            body: JSON.stringify({ allowed_kinds: newAllowedKinds })
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            console.log("Updated subkey kinds:", result);
+            form.reset();
+            loadSubkeys();
+        } else {
+            alert('Failed to update subkey kinds');
+        }
+    }
+    async function updateSubkeyName(event, pubkey) {
+        event.preventDefault();
+        const form = event.target;
+        const newName = form.name.value;
+
+        const token = await getAuthToken(`/api/subkey/${pubkey}/name`, 'PUT');
+        const response = await fetch(`/api/subkey/${pubkey}/name`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Nostr ' + token
+            },
+            body: JSON.stringify({ name: newName })
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            console.log("Updated subkey name:", result);
+            form.reset();
+            loadSubkeys();
+        } else {
+            alert('Failed to update subkey name');
+        }
+    }
+
+
     document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('login-button').addEventListener('click', login);
         document.getElementById('add-subkey-form').addEventListener('submit', addSubkey);
-        document.getElementById('select-all').addEventListener('change', function() {
-            const checkboxes = document.querySelectorAll('.subkey-checkbox');
-            checkboxes.forEach(checkbox => checkbox.checked = this.checked);
-            updateDeleteSelectedButton();
-        });
-        document.getElementById('subkey-table-body').addEventListener('change', function(e) {
-            if (e.target.classList.contains('subkey-checkbox')) {
-                updateDeleteSelectedButton();
-            }
-        });
-        document.getElementById('delete-selected').addEventListener('click', async function() {
-            const checkedBoxes = document.querySelectorAll('.subkey-checkbox:checked');
-            const pubkeys = Array.from(checkedBoxes).map(checkbox => checkbox.dataset.pubkey);
-            
-            for (const pubkey of pubkeys) {
-                await deleteSubkey(pubkey);
-            }
-            
-            loadSubkeys();
-        });
-    });
+        document.getElementById('generate-subkey-backend').addEventListener('click', generateSubkeyBackend);
+
+});
 </script>
 </body>
 </html>

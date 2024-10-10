@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fasthttp/websocket"
 	"github.com/fiatjaf/eventstore/sqlite3"
 	"github.com/fiatjaf/khatru"
 	"github.com/gorilla/mux"
@@ -47,15 +48,24 @@ func main() {
 
 func setupRoutes() *mux.Router {
 	r := mux.NewRouter()
-	r.HandleFunc("/", homeHandler).Methods("GET")
+	r.HandleFunc("/", rootHandler).Methods("GET")
 	r.HandleFunc("/api/login", authMiddleware(LoginHandler)).Methods("POST")
 	r.HandleFunc("/api/subkeys", authMiddleware(GetSubkeysHandler)).Methods("GET")
 	r.HandleFunc("/api/subkey", authMiddleware(AddSubkeyHandler)).Methods("POST")
 	r.HandleFunc("/api/subkey/{pubkey}", authMiddleware(DeleteSubkeyHandler)).Methods("DELETE")
 	r.HandleFunc("/api/subkeys/delete", authMiddleware(DeleteMultipleSubkeysHandler)).Methods("POST")
-	r.PathPrefix("/relay").Handler(relay)
+	r.HandleFunc("/api/subkey/{pubkey}/kinds", authMiddleware(UpdateSubkeyKindsHandler)).Methods("PUT")
+	r.HandleFunc("/api/subkey/{pubkey}/name", authMiddleware(UpdateSubkeyNameHandler)).Methods("PUT")
+	r.HandleFunc("/api/subkey/generate", authMiddleware(GenerateSubkeyHandler)).Methods("POST")
 
 	return r
+}
+func rootHandler(w http.ResponseWriter, r *http.Request) {
+	if websocket.IsWebSocketUpgrade(r) {
+		relay.ServeHTTP(w, r)
+	} else {
+		homeHandler(w, r)
+	}
 }
 
 func initApp() error {
