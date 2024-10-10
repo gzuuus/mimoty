@@ -152,20 +152,3 @@ func initDatabases() error {
 
 	return nil
 }
-
-func CreateHomeHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		data := struct {
-			RelayName        string
-			RelayDescription string
-			AllowedKinds     []int
-			WhitelistEnabled bool
-			Host             string
-		}{
-			RelayName:        relay.Info.Name,
-			RelayDescription: relay.Info.Description,
-			Host:             r.Host,
-		}
-		RenderTemplate(w, data)
-	}
-}

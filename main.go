@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,12 +23,13 @@ import (
 )
 
 var (
-	eventDB           *sqlite3.SQLite3Backend
-	subkeyDB          *sql.DB
-	relay             *khatru.Relay
-	rootPrivateKey    string
-	rebroadcastRelays []string
-	rootPublicKey     string
+	eventDB        *sqlite3.SQLite3Backend
+	subkeyDB       *sql.DB
+	relay          *khatru.Relay
+	rootPrivateKey string
+	// rebroadcastRelays []string
+	rootPublicKey string
+	templates     *template.Template
 )
 
 func main() {
@@ -44,13 +47,14 @@ func main() {
 
 func setupRoutes() *mux.Router {
 	r := mux.NewRouter()
-	r.HandleFunc("/", CreateHomeHandler()).Methods("GET")
+	r.HandleFunc("/", homeHandler).Methods("GET")
 	r.HandleFunc("/api/login", authMiddleware(LoginHandler)).Methods("POST")
 	r.HandleFunc("/api/subkeys", authMiddleware(GetSubkeysHandler)).Methods("GET")
 	r.HandleFunc("/api/subkey", authMiddleware(AddSubkeyHandler)).Methods("POST")
 	r.HandleFunc("/api/subkey/{pubkey}", authMiddleware(DeleteSubkeyHandler)).Methods("DELETE")
 	r.HandleFunc("/api/subkeys/delete", authMiddleware(DeleteMultipleSubkeysHandler)).Methods("POST")
 	r.PathPrefix("/relay").Handler(relay)
+
 	return r
 }
 
@@ -70,8 +74,8 @@ func initApp() error {
 		return fmt.Errorf("failed to get root public key: %w", err)
 	}
 
-	rebroadcastRelaysStr := os.Getenv("REBROADCAST_RELAYS")
-	rebroadcastRelays = strings.Split(rebroadcastRelaysStr, ",")
+	// rebroadcastRelaysStr := os.Getenv("REBROADCAST_RELAYS")
+	// rebroadcastRelays = strings.Split(rebroadcastRelaysStr, ",")
 
 	if err := initDatabases(); err != nil {
 		return fmt.Errorf("failed to initialize databases: %w", err)
@@ -80,10 +84,40 @@ func initApp() error {
 	relay = khatru.NewRelay()
 	setupRelay()
 
-	InitTemplates()
+	if err := initTemplates(); err != nil {
+		return fmt.Errorf("failed to initialize templates: %w", err)
+	}
 
 	return nil
 }
+func initTemplates() error {
+	var err error
+	templatesDir := "templates"
+	templates, err = template.ParseFiles(filepath.Join(templatesDir, "home.html"))
+	if err != nil {
+		return fmt.Errorf("failed to parse templates: %w", err)
+	}
+	return nil
+}
+
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		Title            string
+		RelayName        string
+		RelayDescription string
+		Host             string
+	}{
+		Title:            "Subkey Management",
+		RelayName:        relay.Info.Name,
+		RelayDescription: relay.Info.Description,
+		Host:             r.Host,
+	}
+	err := templates.ExecuteTemplate(w, "home.html", data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -171,7 +205,7 @@ func storeEvent(ctx context.Context, event *nostr.Event) error {
 		return fmt.Errorf("failed to save event: %w", err)
 	}
 
-	go rebroadcastEvent(resignedEvent)
+	// go rebroadcastEvent(resignedEvent)
 
 	return nil
 }
@@ -222,17 +256,17 @@ func resignEvent(event *nostr.Event) (*nostr.Event, error) {
 	return &resignedEvent, nil
 }
 
-func rebroadcastEvent(event *nostr.Event) {
-	for _, url := range rebroadcastRelays {
-		relay, err := nostr.RelayConnect(context.Background(), url)
-		if err != nil {
-			log.Printf("Failed to connect to relay %s: %v", url, err)
-			continue
-		}
-		defer relay.Close()
+// func rebroadcastEvent(event *nostr.Event) {
+// 	for _, url := range rebroadcastRelays {
+// 		relay, err := nostr.RelayConnect(context.Background(), url)
+// 		if err != nil {
+// 			log.Printf("Failed to connect to relay %s: %v", url, err)
+// 			continue
+// 		}
+// 		defer relay.Close()
 
-		if err := relay.Publish(context.Background(), *event); err != nil {
-			log.Printf("Failed to publish event to relay %s: %v", url, err)
-		}
-	}
-}
+// 		if err := relay.Publish(context.Background(), *event); err != nil {
+// 			log.Printf("Failed to publish event to relay %s: %v", url, err)
+// 		}
+// 	}
+// }

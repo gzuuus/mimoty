@@ -1,23 +1,9 @@
-package main
-
-import (
-	"html/template"
-	"log"
-	"net/http"
-)
-
-var templates *template.Template
-
-func InitTemplates() {
-	var err error
-	templates, err = template.New("").Parse(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.RelayName}} - Subkey Management</title>
-    <script src="https://unpkg.com/htmx.org@1.9.2"></script>
     <script src="https://unpkg.com/nostr-tools/lib/nostr.bundle.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 
@@ -83,11 +69,11 @@ func InitTemplates() {
             display: none;
             margin-top: 10px;
         }
-        .show-qr, .hide-qr {
+        .show-qr, .show-qr-priv, .hide-qr {
             background-color: #2ecc71;
             margin-left: 10px;
         }
-        .hide-qr {
+        .hide-qr, .hide-qr-priv {
             display: none;
         }
         .checkbox-column {
@@ -103,9 +89,15 @@ func InitTemplates() {
     <div class="container">
         <h1>{{.RelayName}} - Subkey Management</h1>
         
+        <div class="card">
+            <h2>Relay Information</h2>
+            <p>{{.RelayDescription}}</p>
+            <p><strong>Connect to this relay using:</strong> <code>ws://{{.Host}}/relay</code></p>
+        </div>
+
         <div class="card" id="login-section">
             <h2>Login</h2>
-            <button id="login-button" class="button" onclick="login()">Login with Nostr</button>
+            <button id="login-button" class="button">Login with Nostr</button>
         </div>
 
         <div class="card" id="subkey-management" style="display: none;">
@@ -136,7 +128,7 @@ func InitTemplates() {
         </div>
     </div>
 
-    <script>
+<script>
     const tokenCache = new Map();
 
     async function getAuthToken(url, method) {
@@ -199,7 +191,7 @@ func InitTemplates() {
         subkeyTableBody.innerHTML = '';
         subkeys.forEach(subkey => {
             const row = document.createElement('tr');
-            row.innerHTML = ` + "`" + `
+            row.innerHTML = `
                 <td><input type="checkbox" class="subkey-checkbox" data-pubkey="${subkey.pubkey}"></td>
                 <td class="key-column">
                     ${subkey.pubkey}
@@ -208,12 +200,18 @@ func InitTemplates() {
                     <button class="hide-qr" onclick="hideQR(this)">Hide QR</button>
                     <div class="qr-code"></div>
                 </td>
-                <td class="key-column">${subkey.privkey}</td>
+                <td class="key-column">
+                    ${subkey.privkey}
+                    <br>
+                    <button class="show-qr-priv" onclick="showQR(this, '${subkey.privkey}')">Show QR</button>
+                    <button class="hide-qr-priv" onclick="hideQR(this)">Hide QR</button>
+                    <div class="qr-code"></div>    
+                </td>
                 <td>${subkey.allowed_kinds}</td>
                 <td>
                     <button onclick="deleteSubkey('${subkey.pubkey}')" class="button delete">Delete</button>
                 </td>
-            ` + "`" + `;
+            `;
             subkeyTableBody.appendChild(row);
         });
         updateDeleteSelectedButton();
@@ -239,34 +237,11 @@ func InitTemplates() {
         button.previousElementSibling.style.display = 'inline-block';
     }
 
-    document.getElementById('select-all').addEventListener('change', function() {
-        const checkboxes = document.querySelectorAll('.subkey-checkbox');
-        checkboxes.forEach(checkbox => checkbox.checked = this.checked);
-        updateDeleteSelectedButton();
-    });
-
-    document.getElementById('subkey-table-body').addEventListener('change', function(e) {
-        if (e.target.classList.contains('subkey-checkbox')) {
-            updateDeleteSelectedButton();
-        }
-    });
-
     function updateDeleteSelectedButton() {
         const deleteSelectedButton = document.getElementById('delete-selected');
         const checkedBoxes = document.querySelectorAll('.subkey-checkbox:checked');
         deleteSelectedButton.style.display = checkedBoxes.length > 0 ? 'block' : 'none';
     }
-
-    document.getElementById('delete-selected').addEventListener('click', async function() {
-        const checkedBoxes = document.querySelectorAll('.subkey-checkbox:checked');
-        const pubkeys = Array.from(checkedBoxes).map(checkbox => checkbox.dataset.pubkey);
-        
-        for (const pubkey of pubkeys) {
-            await deleteSubkey(pubkey);
-        }
-        
-        loadSubkeys();
-    });
 
     async function deleteSubkey(pubkey) {
         const token = await getAuthToken('/api/subkey/' + pubkey, 'DELETE');
@@ -318,20 +293,30 @@ func InitTemplates() {
         }
     }
 
-    document.getElementById('add-subkey-form').addEventListener('submit', addSubkey);
-    </script>
+    document.addEventListener('DOMContentLoaded', function() {
+        document.getElementById('login-button').addEventListener('click', login);
+        document.getElementById('add-subkey-form').addEventListener('submit', addSubkey);
+        document.getElementById('select-all').addEventListener('change', function() {
+            const checkboxes = document.querySelectorAll('.subkey-checkbox');
+            checkboxes.forEach(checkbox => checkbox.checked = this.checked);
+            updateDeleteSelectedButton();
+        });
+        document.getElementById('subkey-table-body').addEventListener('change', function(e) {
+            if (e.target.classList.contains('subkey-checkbox')) {
+                updateDeleteSelectedButton();
+            }
+        });
+        document.getElementById('delete-selected').addEventListener('click', async function() {
+            const checkedBoxes = document.querySelectorAll('.subkey-checkbox:checked');
+            const pubkeys = Array.from(checkedBoxes).map(checkbox => checkbox.dataset.pubkey);
+            
+            for (const pubkey of pubkeys) {
+                await deleteSubkey(pubkey);
+            }
+            
+            loadSubkeys();
+        });
+    });
+</script>
 </body>
 </html>
-`)
-	if err != nil {
-		log.Fatalf("Failed to parse template: %v", err)
-	}
-}
-
-func RenderTemplate(w http.ResponseWriter, data interface{}) {
-	w.Header().Set("Content-Type", "text/html")
-	err := templates.ExecuteTemplate(w, "", data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
