@@ -1,4 +1,4 @@
-.env# Go build artifacts
+.env
 /bin
 /pkg
 /vendor
