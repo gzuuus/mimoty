@@ -1,0 +1,12 @@
+.env# Go build artifacts
+/bin
+/pkg
+/vendor
+
+# SQLite database files
+*.db
+
+# Other common ignore patterns
+.DS_Store
+Thumbs.db
+ehthumbs.db
