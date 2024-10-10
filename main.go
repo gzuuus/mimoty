@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +32,42 @@ var (
 	// rebroadcastRelays []string
 	rootPublicKey string
 	templates     *template.Template
+	pool          *nostr.SimplePool
+	config        Config
 )
+
+type Config struct {
+	RelayName        string
+	RelayPubkey      string
+	RelayPrivateKey  string
+	RelayDescription string
+	RelayIcon        string
+	RelayContact     string
+	DBPath           string
+	RefreshInterval  int
+}
+
+func LoadConfig() Config {
+	return Config{
+		RelayName:        os.Getenv("RELAY_NAME"),
+		RelayPubkey:      os.Getenv("RELAY_PUBKEY"),
+		RelayPrivateKey:  os.Getenv("ROOT_PRIVATE_KEY"),
+		RelayDescription: os.Getenv("RELAY_DESCRIPTION"),
+		RelayIcon:        os.Getenv("RELAY_ICON"),
+		RelayContact:     os.Getenv("RELAY_CONTACT"),
+		DBPath:           os.Getenv("DB_PATH"),
+		RefreshInterval:  getEnvAsInt("REFRESH_INTERVAL_HOURS", 3),
+	}
+}
+
+func getEnvAsInt(key string, defaultVal int) int {
+	if value, exists := os.LookupEnv(key); exists {
+		if intVal, err := strconv.Atoi(value); err == nil {
+			return intVal
+		}
+	}
+	return defaultVal
+}
 
 func main() {
 	if err := initApp(); err != nil {
@@ -39,6 +75,9 @@ func main() {
 	}
 
 	r := setupRoutes()
+
+	go refreshRootKeyEvents(context.Background(), relay)
+	go fetchRootKeyEvents(context.Background(), relay)
 
 	log.Println("Starting server on :3334")
 	if err := http.ListenAndServe(":3334", r); err != nil {
@@ -73,7 +112,9 @@ func initApp() error {
 		return fmt.Errorf("error loading .env file: %w", err)
 	}
 
-	rootPrivateKey = os.Getenv("ROOT_PRIVATE_KEY")
+	config = LoadConfig()
+
+	rootPrivateKey = config.RelayPrivateKey
 	if rootPrivateKey == "" {
 		return fmt.Errorf("ROOT_PRIVATE_KEY not set in environment")
 	}
@@ -84,9 +125,6 @@ func initApp() error {
 		return fmt.Errorf("failed to get root public key: %w", err)
 	}
 
-	// rebroadcastRelaysStr := os.Getenv("REBROADCAST_RELAYS")
-	// rebroadcastRelays = strings.Split(rebroadcastRelaysStr, ",")
-
 	if err := initDatabases(); err != nil {
 		return fmt.Errorf("failed to initialize databases: %w", err)
 	}
@@ -94,11 +132,28 @@ func initApp() error {
 	relay = khatru.NewRelay()
 	setupRelay()
 
+	ctx := context.Background()
+	pool = nostr.NewSimplePool(ctx)
+
 	if err := initTemplates(); err != nil {
 		return fmt.Errorf("failed to initialize templates: %w", err)
 	}
 
 	return nil
+}
+
+func refreshRootKeyEvents(ctx context.Context, relay *khatru.Relay) {
+	ticker := time.NewTicker(time.Duration(config.RefreshInterval) * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			fetchRootKeyEvents(ctx, relay)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 func initTemplates() error {
 	var err error
@@ -280,3 +335,51 @@ func resignEvent(event *nostr.Event) (*nostr.Event, error) {
 // 		}
 // 	}
 // }
+
+func fetchRootKeyEvents(ctx context.Context, relay *khatru.Relay) {
+	rootPubkey := config.RelayPubkey
+	seedRelay := "wss://relay.nostr.band"
+
+	filters := []nostr.Filter{{
+		Authors: []string{rootPubkey},
+		Kinds:   []int{nostr.KindProfileMetadata, nostr.KindFollowList, 10002}, // 0, 3, and 10002
+	}}
+
+	log.Println("Fetching root key events")
+	events := fetchEvents(ctx, seedRelay, filters)
+
+	for _, ev := range events {
+		processAndPublishEvent(ctx, relay, ev)
+	}
+	log.Printf("Fetched and processed %d events", len(events))
+}
+
+func fetchEvents(ctx context.Context, relayURL string, filters []nostr.Filter) []*nostr.Event {
+	timeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	events := make([]*nostr.Event, 0)
+	for ev := range pool.SubManyEose(timeout, []string{relayURL}, filters) {
+		events = append(events, ev.Event)
+	}
+	return events
+}
+
+func processAndPublishEvent(ctx context.Context, relay *khatru.Relay, ev *nostr.Event) {
+	err := eventDB.SaveEvent(ctx, ev)
+	if err != nil {
+		log.Printf("Error publishing event %s: %v", ev.ID, err)
+		return
+	}
+
+	relay.BroadcastEvent(ev)
+
+	switch ev.Kind {
+	case nostr.KindProfileMetadata:
+		log.Printf("Processed profile metadata")
+	case nostr.KindFollowList:
+		log.Printf("Processed contact list")
+	case 10002:
+		log.Printf("Processed relay list metadata")
+	}
+}
