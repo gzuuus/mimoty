@@ -46,7 +46,7 @@ func AddSubkeyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Added new subkey: Pubkey: %s, Name: %s, Allowed Kinds: %s", pubkey, subkey.Name, subkey.AllowedKinds)
-
+	subkeyCache.Set(pubkey, subkey.AllowedKinds, 1)
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Subkey added successfully", "pubkey": pubkey})
 }
@@ -144,13 +144,13 @@ func initDatabases() error {
 	var err error
 
 	// Initialize event database
-	eventDB = &sqlite3.SQLite3Backend{DatabaseURL: "events.db"}
+	eventDB = &sqlite3.SQLite3Backend{DatabaseURL: config.EventsDBPath}
 	if err := eventDB.Init(); err != nil {
 		return fmt.Errorf("failed to initialize event database: %w", err)
 	}
 
 	// Initialize subkey database
-	subkeyDB, err = sql.Open("sqlite3", "subkeys.db")
+	subkeyDB, err = sql.Open("sqlite3", config.SubkeysDBPath)
 	if err != nil {
 		return fmt.Errorf("failed to open subkey database: %w", err)
 	}
@@ -184,7 +184,7 @@ func UpdateSubkeyKindsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to update subkey kinds", http.StatusInternalServerError)
 		return
 	}
-
+	subkeyCache.Set(pubkey, update.AllowedKinds, 1)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Subkey kinds updated successfully"})
 }

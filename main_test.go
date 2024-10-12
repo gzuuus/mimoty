@@ -36,8 +36,8 @@ func TestMain(m *testing.M) {
 func setupTestEnvironment() {
 	var err error
 
-	rootPrivateKey = nostr.GeneratePrivateKey()
-	os.Setenv("ROOT_PRIVATE_KEY", rootPrivateKey)
+	config.RelayPrivateKey = nostr.GeneratePrivateKey()
+	os.Setenv("ROOT_PRIVATE_KEY", config.RelayPrivateKey)
 
 	// Initialize test databases
 	eventDB = &sqlite3.SQLite3Backend{DatabaseURL: testEventDBPath}
@@ -153,7 +153,7 @@ func TestStoreAndResignEvent(t *testing.T) {
 	err = storeEvent(context.Background(), event)
 	assert.NoError(t, err)
 
-	rootPubkey, _ := nostr.GetPublicKey(rootPrivateKey)
+	rootPubkey, _ := nostr.GetPublicKey(config.RelayPrivateKey)
 	storedEvents, err := eventDB.QueryEvents(context.Background(), nostr.Filter{
 		Authors: []string{rootPubkey},
 		Kinds:   []int{1},

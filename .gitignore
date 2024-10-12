@@ -1,5 +1,6 @@
 .env
 go.sum
+codebase.md
 
 # SQLite database files
 *.db
