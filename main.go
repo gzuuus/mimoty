@@ -167,7 +167,6 @@ func initApp() error {
 
 	ctx := context.Background()
 	pool = nostr.NewSimplePool(ctx)
-
 	go RefreshTrustNetwork(ctx)
 
 	if err := initTemplates(); err != nil {
@@ -297,7 +296,6 @@ func setupRelay() {
 }
 
 func storeEvent(ctx context.Context, event *nostr.Event) error {
-	// Check if the event is from a subkey and resign if necessary
 	if isValidSubkeyEvent(event) {
 		resignedEvent, err := resignEvent(event)
 		if err != nil {
@@ -306,9 +304,14 @@ func storeEvent(ctx context.Context, event *nostr.Event) error {
 		event = resignedEvent
 	}
 
-	// Store the event
 	if err := eventDB.SaveEvent(ctx, event); err != nil {
 		return fmt.Errorf("failed to save event: %w", err)
+	}
+
+	if event.PubKey == config.RelayPubkey && (event.Kind == 0 || event.Kind == 3 || event.Kind == 10002) {
+		if err := syncEventToSubkeys(ctx, event); err != nil {
+			log.Printf("Failed to sync event: %v", err)
+		}
 	}
 
 	return nil
@@ -387,6 +390,47 @@ func resignEvent(event *nostr.Event) (*nostr.Event, error) {
 		return nil, err
 	}
 	return &resignedEvent, nil
+}
+
+func resignEventWithSubkey(event *nostr.Event, pubkey, privkey string) (*nostr.Event, error) {
+	resignedEvent := *event
+	resignedEvent.PubKey = pubkey
+	resignedEvent.ID = ""
+	resignedEvent.Sig = ""
+	resignedEvent.CreatedAt = nostr.Timestamp(time.Now().Unix())
+
+	if err := resignedEvent.Sign(privkey); err != nil {
+		return nil, fmt.Errorf("failed to sign event: %w", err)
+	}
+
+	return &resignedEvent, nil
+}
+
+func syncEventToSubkeys(ctx context.Context, event *nostr.Event) error {
+	rows, err := subkeyDB.Query("SELECT pubkey, privkey FROM subkeys")
+	if err != nil {
+		return fmt.Errorf("failed to fetch subkeys: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var pubkey, privkey string
+		if err := rows.Scan(&pubkey, &privkey); err != nil {
+			return fmt.Errorf("failed to scan subkey: %w", err)
+		}
+
+		resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
+		if err != nil {
+			log.Printf("Failed to resign event for subkey %s: %v", pubkey, err)
+			continue
+		}
+
+		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+			log.Printf("Failed to save synced event for subkey %s: %v", pubkey, err)
+		}
+	}
+
+	return nil
 }
 
 // func rebroadcastEvent(event *nostr.Event) {

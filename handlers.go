@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -44,6 +45,31 @@ func AddSubkeyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to add subkey", http.StatusInternalServerError)
 		return
 	}
+
+	go func() {
+		ctx := context.Background()
+		filter := nostr.Filter{
+			Authors: []string{config.RelayPubkey},
+			Kinds:   []int{0, 3, 10002},
+		}
+		events, err := eventDB.QueryEvents(ctx, filter)
+		if err != nil {
+			log.Printf("Failed to query root key events: %v", err)
+			return
+		}
+
+		for event := range events {
+			resignedEvent, err := resignEventWithSubkey(event, pubkey, subkey.Privkey)
+			if err != nil {
+				log.Printf("Failed to resign event for new subkey %s: %v", pubkey, err)
+				continue
+			}
+
+			if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+				log.Printf("Failed to save synced event for new subkey %s: %v", pubkey, err)
+			}
+		}
+	}()
 
 	log.Printf("Added new subkey: Pubkey: %s, Name: %s, Allowed Kinds: %s", pubkey, subkey.Name, subkey.AllowedKinds)
 	subkeyCache.Set(pubkey, subkey.AllowedKinds, 1)
