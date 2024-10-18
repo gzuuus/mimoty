@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgraph-io/ristretto"
@@ -37,6 +38,7 @@ var (
 	seedRelays        []string
 	trustNetworkCache *ristretto.Cache
 	subkeyCache       *ristretto.Cache
+	dbMutex           sync.Mutex
 )
 
 type Config struct {
@@ -296,6 +298,8 @@ func setupRelay() {
 }
 
 func storeEvent(ctx context.Context, event *nostr.Event) error {
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
 	if isValidSubkeyEvent(event) {
 		resignedEvent, err := resignEvent(event)
 		if err != nil {
@@ -339,10 +343,13 @@ func validateEvent(ctx context.Context, event *nostr.Event) (bool, string) {
 }
 
 func isValidSubkeyEvent(event *nostr.Event) bool {
-	// Check cache first
 	if cached, found := subkeyCache.Get(event.PubKey); found {
-		allowedKinds := cached.([]int)
-		return contains(allowedKinds, event.Kind)
+		allowedKinds, ok := cached.(string)
+		if !ok {
+			log.Printf("Invalid cache entry for pubkey %s", event.PubKey)
+			return false
+		}
+		return isKindAllowed(event.Kind, allowedKinds)
 	}
 
 	var allowedKindsStr string
@@ -358,7 +365,11 @@ func isValidSubkeyEvent(event *nostr.Event) bool {
 	// Cache the parsed result
 	subkeyCache.Set(event.PubKey, allowedKinds, 1)
 
-	return contains(allowedKinds, event.Kind)
+	return isKindAllowed(event.Kind, allowedKindsStr)
+}
+func isKindAllowed(kind int, allowedKindsStr string) bool {
+	allowedKinds := parseAllowedKinds(allowedKindsStr)
+	return contains(allowedKinds, kind)
 }
 
 func parseAllowedKinds(allowedKindsStr string) []int {
@@ -425,7 +436,10 @@ func syncEventToSubkeys(ctx context.Context, event *nostr.Event) error {
 			continue
 		}
 
-		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+		dbMutex.Lock()
+		err = eventDB.SaveEvent(ctx, resignedEvent)
+		dbMutex.Unlock()
+		if err != nil {
 			log.Printf("Failed to save synced event for subkey %s: %v", pubkey, err)
 		}
 	}
