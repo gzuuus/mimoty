@@ -69,7 +69,7 @@ func LoadConfig() Config {
 		EventsDBPath:     os.Getenv("EV_DB_PATH"),
 		SubkeysDBPath:    os.Getenv("SUBKEYS_DB_PATH"),
 		RefreshInterval:  getEnvAsInt("REFRESH_INTERVAL_HOURS", 2),
-		MaxHops:          getEnvAsInt("MAX_HOPS", 3),
+		MaxHops:          getEnvAsInt("MAX_HOPS", 2),
 	}
 }
 
@@ -297,11 +297,18 @@ func setupRelay() {
 
 func storeEvent(ctx context.Context, event *nostr.Event) error {
 	if isValidSubkeyEvent(event) {
-		resignedEvent, err := resignEvent(event)
-		if err != nil {
-			return fmt.Errorf("failed to re-sign event: %w", err)
+		resignedEvent, err := resignEventWithRoot(event)
+		if event.Kind != 0 && event.Kind != 3 && event.Kind != 10002 {
+			if err != nil {
+				return fmt.Errorf("failed to re-sign event: %w", err)
+			}
+			event = resignedEvent
+		} else {
+			// TODO: resign event with root key, handle more robust logic
+			// if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+			// 	return fmt.Errorf("failed to save resigned event: %w", err)
+			// }
 		}
-		event = resignedEvent
 	}
 
 	if err := eventDB.SaveEvent(ctx, event); err != nil {
@@ -337,11 +344,13 @@ func validateEvent(ctx context.Context, event *nostr.Event) (bool, string) {
 
 	return true, "event not allowed: pubkey not in trust network"
 }
-
 func isValidSubkeyEvent(event *nostr.Event) bool {
-	// Check cache first
 	if cached, found := subkeyCache.Get(event.PubKey); found {
-		allowedKinds := cached.([]int)
+		allowedKinds, ok := cached.([]int)
+		if !ok {
+			log.Printf("Invalid cache entry for pubkey %s", event.PubKey)
+			return false
+		}
 		return contains(allowedKinds, event.Kind)
 	}
 
@@ -355,7 +364,6 @@ func isValidSubkeyEvent(event *nostr.Event) bool {
 	}
 
 	allowedKinds := parseAllowedKinds(allowedKindsStr)
-	// Cache the parsed result
 	subkeyCache.Set(event.PubKey, allowedKinds, 1)
 
 	return contains(allowedKinds, event.Kind)
@@ -381,7 +389,7 @@ func contains(slice []int, item int) bool {
 	return false
 }
 
-func resignEvent(event *nostr.Event) (*nostr.Event, error) {
+func resignEventWithRoot(event *nostr.Event) (*nostr.Event, error) {
 	resignedEvent := *event
 
 	resignedEvent.PubKey = config.RelayPubkey
@@ -407,6 +415,7 @@ func resignEventWithSubkey(event *nostr.Event, pubkey, privkey string) (*nostr.E
 }
 
 func syncEventToSubkeys(ctx context.Context, event *nostr.Event) error {
+	// TODO: Ensure we sync relays to read only and just the current relay url to write
 	rows, err := subkeyDB.Query("SELECT pubkey, privkey FROM subkeys")
 	if err != nil {
 		return fmt.Errorf("failed to fetch subkeys: %w", err)
@@ -424,8 +433,8 @@ func syncEventToSubkeys(ctx context.Context, event *nostr.Event) error {
 			log.Printf("Failed to resign event for subkey %s: %v", pubkey, err)
 			continue
 		}
-
-		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+		err = eventDB.SaveEvent(ctx, resignedEvent)
+		if err != nil {
 			log.Printf("Failed to save synced event for subkey %s: %v", pubkey, err)
 		}
 	}
