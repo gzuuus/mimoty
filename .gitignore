@@ -1,6 +1,6 @@
 .env
 go.sum
 codebase.md
-
+mimo-relay
 # SQLite database files
 *.db
