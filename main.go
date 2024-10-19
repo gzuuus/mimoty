@@ -415,6 +415,7 @@ func resignEventWithSubkey(event *nostr.Event, pubkey, privkey string) (*nostr.E
 }
 
 func syncEventToSubkeys(ctx context.Context, event *nostr.Event) error {
+	// TODO: Ensure we sync relays to read only and just the current relay url to write
 	rows, err := subkeyDB.Query("SELECT pubkey, privkey FROM subkeys")
 	if err != nil {
 		return fmt.Errorf("failed to fetch subkeys: %w", err)
