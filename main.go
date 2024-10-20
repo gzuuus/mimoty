@@ -40,12 +40,14 @@ var (
 )
 
 type Config struct {
+	Port             string
 	RelayName        string
 	RelayPubkey      string
 	RelayPrivateKey  string
 	RelayDescription string
 	RelayIcon        string
 	RelayContact     string
+	RelayDomain      string
 	EventsDBPath     string
 	SubkeysDBPath    string
 	RefreshInterval  int
@@ -61,11 +63,13 @@ type ValidationResult struct {
 
 func LoadConfig() Config {
 	return Config{
+		Port:             os.Getenv("PORT"),
 		RelayName:        os.Getenv("RELAY_NAME"),
 		RelayPrivateKey:  os.Getenv("ROOT_PRIVATE_KEY"),
 		RelayDescription: os.Getenv("RELAY_DESCRIPTION"),
 		RelayIcon:        os.Getenv("RELAY_ICON"),
 		RelayContact:     os.Getenv("RELAY_CONTACT"),
+		RelayDomain:      os.Getenv("RELAY_DOMAIN"),
 		EventsDBPath:     os.Getenv("EV_DB_PATH"),
 		SubkeysDBPath:    os.Getenv("SUBKEYS_DB_PATH"),
 		RefreshInterval:  getEnvAsInt("REFRESH_INTERVAL_HOURS", 2),
@@ -89,8 +93,9 @@ func main() {
 
 	r := setupRoutes()
 
-	log.Println("Starting server on :3334")
-	if err := http.ListenAndServe(":3334", r); err != nil {
+	addr := fmt.Sprintf(":%s", config.Port)
+	log.Printf("Starting server on %s", addr)
+	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -126,6 +131,14 @@ func initApp() error {
 
 	if config.RelayPrivateKey == "" {
 		return fmt.Errorf("ROOT_PRIVATE_KEY not set in environment")
+	}
+
+	if config.RelayDomain == "" {
+		return fmt.Errorf("RELAY_DOMAIN not set in environment")
+	}
+
+	if config.Port == "" {
+		config.Port = "3334"
 	}
 
 	var err error
@@ -311,14 +324,12 @@ func storeEvent(ctx context.Context, event *nostr.Event) error {
 		}
 	}
 
-	if event.PubKey == config.RelayPubkey && (event.Kind == 0 || event.Kind == 3 || event.Kind == 10002) {
-		if err := syncEventToSubkeys(ctx, event); err != nil {
-			log.Printf("Failed to sync event: %v", err)
-		}
-	}
-
 	if err := eventDB.SaveEvent(ctx, event); err != nil {
 		return fmt.Errorf("failed to save event: %w", err)
+	}
+
+	if err := syncEventWithSubkeys(ctx, event); err != nil {
+		log.Printf("Failed to sync event: %v", err)
 	}
 
 	relay.BroadcastEvent(event)
@@ -395,9 +406,9 @@ func contains(slice []int, item int) bool {
 
 func resignEventWithRoot(event *nostr.Event) (*nostr.Event, error) {
 	resignedEvent := *event
-
 	resignedEvent.PubKey = config.RelayPubkey
 	resignedEvent.CreatedAt = nostr.Timestamp(time.Now().Unix())
+
 	if err := resignedEvent.Sign(config.RelayPrivateKey); err != nil {
 		return nil, err
 	}
@@ -418,8 +429,11 @@ func resignEventWithSubkey(event *nostr.Event, pubkey, privkey string) (*nostr.E
 	return &resignedEvent, nil
 }
 
-func syncEventToSubkeys(ctx context.Context, event *nostr.Event) error {
-	// TODO: Ensure we sync relays to read only and just the current relay url to write
+func syncEventWithSubkeys(ctx context.Context, event *nostr.Event) error {
+	if event.PubKey != config.RelayPubkey || (event.Kind != 0 && event.Kind != 3 && event.Kind != 10002) {
+		return nil
+	}
+
 	rows, err := subkeyDB.Query("SELECT pubkey, privkey FROM subkeys")
 	if err != nil {
 		return fmt.Errorf("failed to fetch subkeys: %w", err)
@@ -429,21 +443,94 @@ func syncEventToSubkeys(ctx context.Context, event *nostr.Event) error {
 	for rows.Next() {
 		var pubkey, privkey string
 		if err := rows.Scan(&pubkey, &privkey); err != nil {
-			return fmt.Errorf("failed to scan subkey: %w", err)
-		}
-
-		resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
-		if err != nil {
-			log.Printf("Failed to resign event for subkey %s: %v", pubkey, err)
+			log.Printf("Failed to scan subkey: %v", err)
 			continue
 		}
-		err = eventDB.SaveEvent(ctx, resignedEvent)
-		if err != nil {
-			log.Printf("Failed to save synced event for subkey %s: %v", pubkey, err)
+
+		if err := SyncEventWithSubkey(ctx, event, pubkey, privkey); err != nil {
+			log.Printf("Failed to sync event for subkey %s: %v", pubkey, err)
 		}
 	}
 
 	return nil
+}
+
+func SyncEventWithSubkey(ctx context.Context, event *nostr.Event, pubkey, privkey string) error {
+	resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
+	if err != nil {
+		return fmt.Errorf("failed to resign event for subkey %s: %w", pubkey, err)
+	}
+
+	switch event.Kind {
+	case 0:
+		log.Println("Syncing metadata event for subkey", pubkey)
+		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
+		}
+	case 3:
+		log.Println("Syncing contact list event for subkey", pubkey)
+		if err := syncContactList(ctx, resignedEvent); err != nil {
+			return fmt.Errorf("failed to sync contact list for subkey %s: %w", pubkey, err)
+		}
+	case 10002:
+		log.Println("Syncing relay list event for subkey", pubkey)
+		if err := syncRelayList(ctx, resignedEvent); err != nil {
+			return fmt.Errorf("failed to sync relay list for subkey %s: %w", pubkey, err)
+		}
+	}
+
+	return nil
+}
+
+func syncRelayList(ctx context.Context, event *nostr.Event) error {
+	var filteredTags nostr.Tags
+	mimoFound := false
+
+	for _, tag := range event.Tags {
+		if tag.Key() == "r" {
+			if tag.Value() == config.RelayDomain {
+				// Keep mimo relay as is (read and write)
+				filteredTags = append(filteredTags, nostr.Tag{"r", config.RelayDomain})
+				mimoFound = true
+			} else {
+				// Set all other relays to read-only
+				filteredTags = append(filteredTags, nostr.Tag{"r", tag.Value(), "read"})
+			}
+		}
+	}
+
+	// If the relay wasn't found, add it
+	if !mimoFound {
+		filteredTags = append(filteredTags, nostr.Tag{"r", config.RelayDomain})
+	}
+
+	// Replace the original tags with the filtered tags
+	event.Tags = filteredTags
+	json, _ := json.MarshalIndent(event, "", "  ")
+	fmt.Println(string(json))
+	return eventDB.SaveEvent(ctx, event)
+}
+
+func syncContactList(ctx context.Context, event *nostr.Event) error {
+	var filteredTags nostr.Tags
+	mimoPubkeyFound := false
+	for _, tag := range event.Tags {
+		if tag.Key() == "p" {
+			if tag.Value() == config.RelayPubkey {
+				filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
+				mimoPubkeyFound = true
+			} else {
+				filteredTags = append(filteredTags, nostr.Tag{"p", tag.Value()})
+			}
+		}
+	}
+
+	if !mimoPubkeyFound {
+		filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
+	}
+
+	event.Tags = filteredTags
+	return eventDB.SaveEvent(ctx, event)
 }
 
 // func rebroadcastEvent(event *nostr.Event) {
