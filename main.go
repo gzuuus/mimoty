@@ -311,14 +311,14 @@ func storeEvent(ctx context.Context, event *nostr.Event) error {
 		}
 	}
 
-	if err := eventDB.SaveEvent(ctx, event); err != nil {
-		return fmt.Errorf("failed to save event: %w", err)
-	}
-
 	if event.PubKey == config.RelayPubkey && (event.Kind == 0 || event.Kind == 3 || event.Kind == 10002) {
 		if err := syncEventToSubkeys(ctx, event); err != nil {
 			log.Printf("Failed to sync event: %v", err)
 		}
+	}
+
+	if err := eventDB.SaveEvent(ctx, event); err != nil {
+		return fmt.Errorf("failed to save event: %w", err)
 	}
 
 	return nil
@@ -345,6 +345,8 @@ func validateEvent(ctx context.Context, event *nostr.Event) (bool, string) {
 	return true, "event not allowed: pubkey not in trust network"
 }
 func isValidSubkeyEvent(event *nostr.Event) bool {
+	// FIXME: Getting error from cache `Invalid cache entry for pubkey`
+
 	if cached, found := subkeyCache.Get(event.PubKey); found {
 		allowedKinds, ok := cached.([]int)
 		if !ok {
