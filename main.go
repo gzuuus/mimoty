@@ -321,6 +321,8 @@ func storeEvent(ctx context.Context, event *nostr.Event) error {
 		return fmt.Errorf("failed to save event: %w", err)
 	}
 
+	relay.BroadcastEvent(event)
+
 	return nil
 }
 
