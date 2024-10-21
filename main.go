@@ -480,6 +480,33 @@ func SyncEventWithSubkey(ctx context.Context, event *nostr.Event, pubkey, privke
 		go rebroadcastEvent(resignedEvent)
 	case 3:
 		var filteredTags nostr.Tags
+		mimoPubkeyFound := false
+		for _, tag := range event.Tags {
+			if tag.Key() == "p" {
+				if tag.Value() == config.RelayPubkey {
+					filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
+					mimoPubkeyFound = true
+				} else {
+					filteredTags = append(filteredTags, nostr.Tag{"p", tag.Value()})
+				}
+			}
+		}
+
+		if !mimoPubkeyFound {
+			filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
+		}
+
+		event.Tags = filteredTags
+		resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
+		if err != nil {
+			return fmt.Errorf("failed to resign event for subkey %s: %w", pubkey, err)
+		}
+		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
+		}
+		go rebroadcastEvent(resignedEvent)
+	case 10002:
+		var filteredTags nostr.Tags
 		mimoFound := false
 
 		for _, tag := range event.Tags {
@@ -501,34 +528,6 @@ func SyncEventWithSubkey(ctx context.Context, event *nostr.Event, pubkey, privke
 		}
 
 		// Replace the original tags with the filtered tags
-		event.Tags = filteredTags
-		resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
-		if err != nil {
-			return fmt.Errorf("failed to resign event for subkey %s: %w", pubkey, err)
-		}
-		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
-			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
-		}
-		go rebroadcastEvent(resignedEvent)
-
-	case 10002:
-		var filteredTags nostr.Tags
-		mimoPubkeyFound := false
-		for _, tag := range event.Tags {
-			if tag.Key() == "p" {
-				if tag.Value() == config.RelayPubkey {
-					filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
-					mimoPubkeyFound = true
-				} else {
-					filteredTags = append(filteredTags, nostr.Tag{"p", tag.Value()})
-				}
-			}
-		}
-
-		if !mimoPubkeyFound {
-			filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
-		}
-
 		event.Tags = filteredTags
 		resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
 		if err != nil {
