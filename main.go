@@ -348,16 +348,11 @@ func (c *Config) InitializeRelay() *khatru.Relay {
 	relay := khatru.NewRelay()
 
 	relay.Info.Name = c.RelayName
-	relay.Info.Description = c.RelayDescription
 	relay.Info.PubKey = c.RelayPubkey
-	relay.Info.Contact = c.RelayContact
-	relay.Info.Software = "https://github.com/gzuuus/mimo-relay"
-	relay.Info.Version = "0.1.0"
-	relay.Info.SupportedNIPs = []int{1, 2, 4, 9, 11, 12, 15, 16, 20, 22, 28, 33, 40}
-
-	if c.RelayIcon != "" {
-		relay.Info.Icon = c.RelayIcon
-	}
+	relay.Info.Icon = c.RelayIcon
+	relay.Info.Description = c.RelayDescription
+	relay.Info.Software = "https://github.com/gzuuus/note-mixer-relay"
+	relay.Info.Version = "0.0.1"
 
 	return relay
 }
