@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -243,15 +242,9 @@ func UpdateSubkeyNameHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func GenerateSubkeyHandler(w http.ResponseWriter, r *http.Request) {
-	privateKey := make([]byte, 32)
-	_, err := rand.Read(privateKey)
-	if err != nil {
-		http.Error(w, "Failed to generate private key", http.StatusInternalServerError)
-		return
-	}
+	privateKey := nostr.GeneratePrivateKey()
 
-	privKeyHex := hex.EncodeToString(privateKey)
-	pubkey, err := nostr.GetPublicKey(privKeyHex)
+	pubkey, err := nostr.GetPublicKey(privateKey)
 	if err != nil {
 		http.Error(w, "Failed to derive public key", http.StatusInternalServerError)
 		return
@@ -262,7 +255,7 @@ func GenerateSubkeyHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]string{
 		"name":          name,
-		"privkey":       privKeyHex,
+		"privkey":       privateKey,
 		"pubkey":        pubkey,
 		"allowed_kinds": allowedKinds,
 	}

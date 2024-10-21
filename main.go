@@ -426,6 +426,14 @@ func resignEventWithSubkey(event *nostr.Event, pubkey, privkey string) (*nostr.E
 		return nil, fmt.Errorf("failed to sign event: %w", err)
 	}
 
+	// FIXME: Event id and sig are not valid?
+	fmt.Println("Checking id", resignedEvent.CheckID())
+	if value, err := resignedEvent.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("failed to check sig: %w", err)
+	} else if !value {
+		return nil, fmt.Errorf("failed to check sig")
+	}
+	fmt.Println(resignedEvent)
 	return &resignedEvent, nil
 }
 
@@ -456,81 +464,77 @@ func syncEventWithSubkeys(ctx context.Context, event *nostr.Event) error {
 }
 
 func SyncEventWithSubkey(ctx context.Context, event *nostr.Event, pubkey, privkey string) error {
-	resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
-	if err != nil {
-		return fmt.Errorf("failed to resign event for subkey %s: %w", pubkey, err)
-	}
 
 	switch event.Kind {
 	case 0:
+		resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
+		if err != nil {
+			return fmt.Errorf("failed to resign event for subkey %s: %w", pubkey, err)
+		}
 		log.Println("Syncing metadata event for subkey", pubkey)
 		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
 			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
 		}
 	case 3:
-		log.Println("Syncing contact list event for subkey", pubkey)
-		if err := syncContactList(ctx, resignedEvent); err != nil {
-			return fmt.Errorf("failed to sync contact list for subkey %s: %w", pubkey, err)
+		var filteredTags nostr.Tags
+		mimoFound := false
+
+		for _, tag := range event.Tags {
+			if tag.Key() == "r" {
+				if tag.Value() == config.RelayDomain {
+					// Keep mimo relay as is (read and write)
+					filteredTags = append(filteredTags, nostr.Tag{"r", config.RelayDomain})
+					mimoFound = true
+				} else {
+					// Set all other relays to read-only
+					filteredTags = append(filteredTags, nostr.Tag{"r", tag.Value(), "read"})
+				}
+			}
+		}
+
+		// If the relay wasn't found, add it
+		if !mimoFound {
+			filteredTags = append(filteredTags, nostr.Tag{"r", config.RelayDomain})
+		}
+
+		// Replace the original tags with the filtered tags
+		event.Tags = filteredTags
+		resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
+		if err != nil {
+			return fmt.Errorf("failed to resign event for subkey %s: %w", pubkey, err)
+		}
+		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
 		}
 	case 10002:
-		log.Println("Syncing relay list event for subkey", pubkey)
-		if err := syncRelayList(ctx, resignedEvent); err != nil {
-			return fmt.Errorf("failed to sync relay list for subkey %s: %w", pubkey, err)
+		var filteredTags nostr.Tags
+		mimoPubkeyFound := false
+		for _, tag := range event.Tags {
+			if tag.Key() == "p" {
+				if tag.Value() == config.RelayPubkey {
+					filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
+					mimoPubkeyFound = true
+				} else {
+					filteredTags = append(filteredTags, nostr.Tag{"p", tag.Value()})
+				}
+			}
+		}
+
+		if !mimoPubkeyFound {
+			filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
+		}
+
+		event.Tags = filteredTags
+		resignedEvent, err := resignEventWithSubkey(event, pubkey, privkey)
+		if err != nil {
+			return fmt.Errorf("failed to resign event for subkey %s: %w", pubkey, err)
+		}
+		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
+			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
 		}
 	}
 
 	return nil
-}
-
-func syncRelayList(ctx context.Context, event *nostr.Event) error {
-	var filteredTags nostr.Tags
-	mimoFound := false
-
-	for _, tag := range event.Tags {
-		if tag.Key() == "r" {
-			if tag.Value() == config.RelayDomain {
-				// Keep mimo relay as is (read and write)
-				filteredTags = append(filteredTags, nostr.Tag{"r", config.RelayDomain})
-				mimoFound = true
-			} else {
-				// Set all other relays to read-only
-				filteredTags = append(filteredTags, nostr.Tag{"r", tag.Value(), "read"})
-			}
-		}
-	}
-
-	// If the relay wasn't found, add it
-	if !mimoFound {
-		filteredTags = append(filteredTags, nostr.Tag{"r", config.RelayDomain})
-	}
-
-	// Replace the original tags with the filtered tags
-	event.Tags = filteredTags
-	json, _ := json.MarshalIndent(event, "", "  ")
-	fmt.Println(string(json))
-	return eventDB.SaveEvent(ctx, event)
-}
-
-func syncContactList(ctx context.Context, event *nostr.Event) error {
-	var filteredTags nostr.Tags
-	mimoPubkeyFound := false
-	for _, tag := range event.Tags {
-		if tag.Key() == "p" {
-			if tag.Value() == config.RelayPubkey {
-				filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
-				mimoPubkeyFound = true
-			} else {
-				filteredTags = append(filteredTags, nostr.Tag{"p", tag.Value()})
-			}
-		}
-	}
-
-	if !mimoPubkeyFound {
-		filteredTags = append(filteredTags, nostr.Tag{"p", config.RelayPubkey})
-	}
-
-	event.Tags = filteredTags
-	return eventDB.SaveEvent(ctx, event)
 }
 
 // func rebroadcastEvent(event *nostr.Event) {
