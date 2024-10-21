@@ -105,6 +105,12 @@ func setupHTTPHandlers(relay *khatru.Relay) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") == "application/nostr+json" {
+			w.Header().Set("Content-Type", "application/nostr+json")
+			json.NewEncoder(w).Encode(relay.Info)
+			return
+		}
+
 		if websocket.IsWebSocketUpgrade(r) {
 			relay.ServeHTTP(w, r)
 		} else if r.URL.Path == "/" {
