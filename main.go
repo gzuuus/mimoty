@@ -105,13 +105,20 @@ func setupHTTPHandlers(relay *khatru.Relay, config *Config) *http.ServeMux {
 
 	// Root handler for WebSocket and NIP-11 info
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") == "application/nostr+json" {
+			w.Header().Set("Content-Type", "application/nostr+json")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			json.NewEncoder(w).Encode(relay.Info)
+			return
+		}
+
 		if r.URL.Path == "/" && r.Header.Get("Upgrade") != "websocket" {
 			// Redirect to /home for regular HTTP requests
 			http.Redirect(w, r, "/home", http.StatusSeeOther)
 			return
 		}
 
-		// Handle WebSocket connections and NIP-11 info requests
+		// Handle WebSocket connections
 		relay.ServeHTTP(w, r)
 	})
 
@@ -345,13 +352,14 @@ func setupRelay() {
 }
 
 func (c *Config) InitializeRelay() *khatru.Relay {
+	// FIXME: Nip11 info still doesn't work
 	relay := khatru.NewRelay()
 
 	relay.Info.Name = c.RelayName
 	relay.Info.PubKey = c.RelayPubkey
 	relay.Info.Icon = c.RelayIcon
 	relay.Info.Description = c.RelayDescription
-	relay.Info.Software = "https://github.com/gzuuus/note-mixer-relay"
+	relay.Info.Software = ""
 	relay.Info.Version = "0.0.1"
 
 	return relay
