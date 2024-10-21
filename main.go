@@ -326,37 +326,33 @@ func setupRelay() {
 	relay.DeleteEvent = append(relay.DeleteEvent, eventDB.DeleteEvent)
 	relay.RejectEvent = append(relay.RejectEvent, validateEvent)
 
-	relay.RejectFilter = append(relay.RejectFilter, policies.NoComplexFilters)
-	relay.RejectConnection = append(relay.RejectConnection, policies.ConnectionRateLimiter(10, time.Minute, 100))
+	relay.RejectFilter = append(relay.RejectFilter,
+		policies.NoEmptyFilters,
+		policies.NoComplexFilters,
+	)
+
+	relay.RejectConnection = append(relay.RejectConnection,
+		policies.ConnectionRateLimiter(10, time.Minute*2, 30),
+	)
+
+	relay.OnConnect = append(relay.OnConnect, func(ctx context.Context) {
+		log.Printf("New WebSocket connection established")
+	})
+
+	relay.OnDisconnect = append(relay.OnDisconnect, func(ctx context.Context) {
+		log.Printf("WebSocket connection closed")
+	})
 }
 
 func (c *Config) InitializeRelay() *khatru.Relay {
 	relay := khatru.NewRelay()
 
-	if c.RelayName != "" {
-		relay.Info.Name = c.RelayName
-	} else {
-		relay.Info.Name = "Mimo Relay"
-	}
-
+	relay.Info.Name = c.RelayName
+	relay.Info.Description = c.RelayDescription
 	relay.Info.PubKey = c.RelayPubkey
-
-	if c.RelayDescription != "" {
-		relay.Info.Description = c.RelayDescription
-	} else {
-		relay.Info.Description = "A Nostr relay powered by Khatru"
-	}
-
+	relay.Info.Contact = c.RelayContact
 	relay.Info.Software = "https://github.com/gzuuus/mimo-relay"
-
 	relay.Info.Version = "0.1.0"
-
-	if c.RelayContact != "" {
-		relay.Info.Contact = c.RelayContact
-	} else {
-		relay.Info.Contact = "operator@" + c.RelayDomain
-	}
-
 	relay.Info.SupportedNIPs = []int{1, 2, 4, 9, 11, 12, 15, 16, 20, 22, 28, 33, 40}
 
 	if c.RelayIcon != "" {
