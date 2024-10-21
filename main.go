@@ -95,7 +95,14 @@ func main() {
 
 	addr := fmt.Sprintf(":%s", config.Port)
 	log.Printf("Starting server on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go RefreshTrustNetwork(context.Background())
+
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -103,7 +110,6 @@ func main() {
 func setupHTTPHandlers(relay *khatru.Relay, config *Config) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Root handler for WebSocket and NIP-11 info
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Accept") == "application/nostr+json" {
 			w.Header().Set("Content-Type", "application/nostr+json")
@@ -113,42 +119,41 @@ func setupHTTPHandlers(relay *khatru.Relay, config *Config) *http.ServeMux {
 		}
 
 		if r.URL.Path == "/" && r.Header.Get("Upgrade") != "websocket" {
-			// Redirect to /home for regular HTTP requests
 			http.Redirect(w, r, "/home", http.StatusSeeOther)
 			return
 		}
 
-		// Handle WebSocket connections
 		relay.ServeHTTP(w, r)
 	})
 
-	// Separate handler for the home page
 	mux.HandleFunc("/home", createHomeHandler(config))
 
 	// API routes
 	mux.HandleFunc("/api/login", authMiddleware(LoginHandler))
 	mux.HandleFunc("/api/subkeys", authMiddleware(GetSubkeysHandler))
 	mux.HandleFunc("/api/subkey", authMiddleware(AddSubkeyHandler))
-	mux.HandleFunc("/api/subkey/", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodDelete:
-			DeleteSubkeyHandler(w, r)
-		case http.MethodPut:
-			if strings.HasSuffix(r.URL.Path, "/kinds") {
-				UpdateSubkeyKindsHandler(w, r)
-			} else if strings.HasSuffix(r.URL.Path, "/name") {
-				UpdateSubkeyNameHandler(w, r)
-			} else {
-				http.NotFound(w, r)
-			}
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	mux.HandleFunc("/api/subkey/", authMiddleware(handleSubkeyOperations))
 	mux.HandleFunc("/api/subkeys/delete", authMiddleware(DeleteMultipleSubkeysHandler))
 	mux.HandleFunc("/api/subkey/generate", authMiddleware(GenerateSubkeyHandler))
 
 	return mux
+}
+
+func handleSubkeyOperations(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodDelete:
+		DeleteSubkeyHandler(w, r)
+	case http.MethodPut:
+		if strings.HasSuffix(r.URL.Path, "/kinds") {
+			UpdateSubkeyKindsHandler(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/name") {
+			UpdateSubkeyNameHandler(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func createHomeHandler(config *Config) http.HandlerFunc {
@@ -176,38 +181,30 @@ func initApp() error {
 
 	config = LoadConfig()
 
-	if config.RelayPrivateKey == "" {
-		return fmt.Errorf("ROOT_PRIVATE_KEY not set in environment")
-	}
-
-	if config.RelayDomain == "" {
-		return fmt.Errorf("RELAY_DOMAIN not set in environment")
-	}
-
-	if config.Port == "" {
-		config.Port = "3334"
-	}
-
-	var err error
-	config.RelayPubkey, err = nostr.GetPublicKey(config.RelayPrivateKey)
-	if err != nil {
-		return fmt.Errorf("failed to get root public key: %w", err)
+	if err := validateConfig(&config); err != nil {
+		return err
 	}
 
 	if config.EventsDBPath == "" {
-		config.EventsDBPath = "events.db"
+		config.EventsDBPath = "event.db"
 	}
-
 	if config.SubkeysDBPath == "" {
 		config.SubkeysDBPath = "subkeys.db"
 	}
 
-	if err := initDatabases(); err != nil {
+	if err := InitDatabases(); err != nil {
 		return fmt.Errorf("failed to initialize databases: %w", err)
 	}
-	initCache()
-	relay = config.InitializeRelay()
-	setupRelay()
+
+	if err := initCache(); err != nil {
+		return fmt.Errorf("failed to initialize cache: %w", err)
+	}
+	if err := loadSubkeysIntoCache(); err != nil {
+		return fmt.Errorf("failed to load subkeys into cache: %w", err)
+	}
+
+	relay = initializeRelay(&config)
+	setupRelay(relay)
 
 	seedRelays = []string{
 		"wss://nos.lol",
@@ -227,10 +224,52 @@ func initApp() error {
 
 	ctx := context.Background()
 	pool = nostr.NewSimplePool(ctx)
-	go RefreshTrustNetwork(ctx)
 
 	if err := initTemplates(); err != nil {
 		return fmt.Errorf("failed to initialize templates: %w", err)
+	}
+
+	return nil
+}
+
+func loadSubkeysIntoCache() error {
+	rows, err := subkeyDB.Query("SELECT pubkey, allowed_kinds FROM subkeys")
+	if err != nil {
+		return fmt.Errorf("failed to fetch subkeys: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var pubkey, allowedKindsStr string
+		if err := rows.Scan(&pubkey, &allowedKindsStr); err != nil {
+			log.Printf("Failed to scan subkey: %v", err)
+			continue
+		}
+
+		allowedKinds := parseAllowedKinds(allowedKindsStr)
+		subkeyCache.Set(pubkey, allowedKinds, 1)
+	}
+
+	return nil
+}
+
+func validateConfig(config *Config) error {
+	if config.RelayPrivateKey == "" {
+		return fmt.Errorf("ROOT_PRIVATE_KEY not set in environment")
+	}
+
+	if config.RelayDomain == "" {
+		return fmt.Errorf("RELAY_DOMAIN not set in environment")
+	}
+
+	if config.Port == "" {
+		config.Port = "3334"
+	}
+
+	var err error
+	config.RelayPubkey, err = nostr.GetPublicKey(config.RelayPrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to get root public key: %w", err)
 	}
 
 	return nil
@@ -327,7 +366,7 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func setupRelay() {
+func setupRelay(relay *khatru.Relay) {
 	relay.StoreEvent = append(relay.StoreEvent, storeEvent)
 	relay.QueryEvents = append(relay.QueryEvents, eventDB.QueryEvents)
 	relay.DeleteEvent = append(relay.DeleteEvent, eventDB.DeleteEvent)
@@ -335,7 +374,6 @@ func setupRelay() {
 
 	relay.RejectFilter = append(relay.RejectFilter,
 		policies.NoEmptyFilters,
-		policies.NoComplexFilters,
 	)
 
 	relay.RejectConnection = append(relay.RejectConnection,
@@ -351,15 +389,13 @@ func setupRelay() {
 	})
 }
 
-func (c *Config) InitializeRelay() *khatru.Relay {
-	// FIXME: Nip11 info still doesn't work
+func initializeRelay(config *Config) *khatru.Relay {
 	relay := khatru.NewRelay()
 
-	relay.Info.Name = c.RelayName
-	relay.Info.PubKey = c.RelayPubkey
-	relay.Info.Icon = c.RelayIcon
-	relay.Info.Description = c.RelayDescription
-	relay.Info.Software = ""
+	relay.Info.Name = config.RelayName
+	relay.Info.PubKey = config.RelayPubkey
+	relay.Info.Icon = config.RelayIcon
+	relay.Info.Description = config.RelayDescription
 	relay.Info.Version = "0.0.1"
 
 	return relay
@@ -395,37 +431,30 @@ func storeEvent(ctx context.Context, event *nostr.Event) error {
 }
 
 func validateEvent(ctx context.Context, event *nostr.Event) (bool, string) {
-	// Check if it's a valid subkey event
 	if isValidSubkeyEvent(event) {
 		return false, ""
 	}
 
-	// Check if the pubkey is in the trust network cache
 	if _, found := trustNetworkCache.Get(event.PubKey); found {
 		return false, ""
 	}
 
-	// If not in cache, check the trustNetworkMap
 	if trustNetworkMap[event.PubKey] {
-		// Add to cache for future quick lookups
 		trustNetworkCache.Set(event.PubKey, true, 1)
 		return false, ""
 	}
 
 	return true, "event not allowed: pubkey not in trust network"
 }
+
 func isValidSubkeyEvent(event *nostr.Event) bool {
 	if cached, found := subkeyCache.Get(event.PubKey); found {
-		switch allowedKinds := cached.(type) {
-		case []int:
-			return contains(allowedKinds, event.Kind)
-		case string:
-			parsedKinds := parseAllowedKinds(allowedKinds)
-			subkeyCache.Set(event.PubKey, parsedKinds, 1)
-			return contains(parsedKinds, event.Kind)
-		default:
+		allowedKinds, ok := cached.([]int)
+		if !ok {
 			log.Printf("Invalid cache entry type for pubkey %s: %T", event.PubKey, cached)
+			return false
 		}
+		return contains(allowedKinds, event.Kind)
 	}
 
 	var allowedKindsStr string

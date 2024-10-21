@@ -36,6 +36,12 @@ func AddSubkeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	allowedKinds := parseAllowedKinds(subkey.AllowedKinds)
+	if len(allowedKinds) == 0 {
+		http.Error(w, "Invalid allowed kinds", http.StatusBadRequest)
+		return
+	}
+
 	now := time.Now().Unix()
 	_, err = subkeyDB.Exec("INSERT OR REPLACE INTO subkeys (pubkey, privkey, name, allowed_kinds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
 		pubkey, subkey.Privkey, subkey.Name, subkey.AllowedKinds, now, now)
@@ -44,10 +50,13 @@ func AddSubkeyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to add subkey", http.StatusInternalServerError)
 		return
 	}
+
+	subkeyCache.Set(pubkey, allowedKinds, 1)
+
 	go initialSyncForNewSubkey(context.Background(), pubkey, subkey.Privkey)
 
-	log.Printf("Added new subkey: Pubkey: %s, Name: %s, Allowed Kinds: %s", pubkey, subkey.Name, subkey.AllowedKinds)
-	subkeyCache.Set(pubkey, subkey.AllowedKinds, 1)
+	log.Printf("Added new subkey: Pubkey: %s, Name: %s, Allowed Kinds: %v", pubkey, subkey.Name, allowedKinds)
+
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Subkey added successfully", "pubkey": pubkey})
 }
@@ -122,6 +131,8 @@ func DeleteSubkeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	deleteSubkeyFromCache(pubkey)
+
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Subkey deleted successfully"})
 }
@@ -168,7 +179,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }
 
-func initDatabases() error {
+func InitDatabases() error {
 	var err error
 
 	// Initialize event database
@@ -206,17 +217,26 @@ func UpdateSubkeyKindsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	allowedKinds := parseAllowedKinds(update.AllowedKinds)
+	if len(allowedKinds) == 0 {
+		http.Error(w, "Invalid allowed kinds", http.StatusBadRequest)
+		return
+	}
+
 	_, err := subkeyDB.Exec("UPDATE subkeys SET allowed_kinds = ? WHERE pubkey = ?", update.AllowedKinds, pubkey)
 	if err != nil {
 		log.Printf("Failed to update subkey kinds: %v", err)
 		http.Error(w, "Failed to update subkey kinds", http.StatusInternalServerError)
 		return
 	}
-	subkeyCache.Set(pubkey, update.AllowedKinds, 1)
+	subkeyCache.Set(pubkey, allowedKinds, 1)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Subkey kinds updated successfully"})
 }
 
+func deleteSubkeyFromCache(pubkey string) {
+	subkeyCache.Del(pubkey)
+}
 func UpdateSubkeyNameHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pubkey := vars["pubkey"]

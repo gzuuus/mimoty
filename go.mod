@@ -6,7 +6,6 @@ toolchain go1.23.2
 
 require (
 	github.com/dgraph-io/ristretto v0.1.1
-	github.com/fasthttp/websocket v1.5.7
 	github.com/fiatjaf/eventstore v0.11.1
 	github.com/fiatjaf/khatru v0.8.3
 	github.com/gorilla/mux v1.8.1
@@ -27,6 +26,7 @@ require (
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/fasthttp/websocket v1.5.7 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
