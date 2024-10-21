@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto"
-	"github.com/fasthttp/websocket"
 	"github.com/fiatjaf/eventstore/sqlite3"
 	"github.com/fiatjaf/khatru"
 	"github.com/fiatjaf/khatru/policies"
@@ -92,7 +91,7 @@ func main() {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 
-	mux := setupHTTPHandlers(relay)
+	mux := setupHTTPHandlers(relay, &config)
 
 	addr := fmt.Sprintf(":%s", config.Port)
 	log.Printf("Starting server on %s", addr)
@@ -101,25 +100,25 @@ func main() {
 	}
 }
 
-func setupHTTPHandlers(relay *khatru.Relay) *http.ServeMux {
+func setupHTTPHandlers(relay *khatru.Relay, config *Config) *http.ServeMux {
 	mux := http.NewServeMux()
 
+	// Root handler for WebSocket and NIP-11 info
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Accept") == "application/nostr+json" {
-			w.Header().Set("Content-Type", "application/nostr+json")
-			json.NewEncoder(w).Encode(relay.Info)
+		if r.URL.Path == "/" && r.Header.Get("Upgrade") != "websocket" {
+			// Redirect to /home for regular HTTP requests
+			http.Redirect(w, r, "/home", http.StatusSeeOther)
 			return
 		}
 
-		if websocket.IsWebSocketUpgrade(r) {
-			relay.ServeHTTP(w, r)
-		} else if r.URL.Path == "/" {
-			homeHandler(w, r)
-		} else {
-			http.NotFound(w, r)
-		}
+		// Handle WebSocket connections and NIP-11 info requests
+		relay.ServeHTTP(w, r)
 	})
 
+	// Separate handler for the home page
+	mux.HandleFunc("/home", createHomeHandler(config))
+
+	// API routes
 	mux.HandleFunc("/api/login", authMiddleware(LoginHandler))
 	mux.HandleFunc("/api/subkeys", authMiddleware(GetSubkeysHandler))
 	mux.HandleFunc("/api/subkey", authMiddleware(AddSubkeyHandler))
@@ -143,6 +142,24 @@ func setupHTTPHandlers(relay *khatru.Relay) *http.ServeMux {
 	mux.HandleFunc("/api/subkey/generate", authMiddleware(GenerateSubkeyHandler))
 
 	return mux
+}
+
+func createHomeHandler(config *Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		data := struct {
+			RelayName        string
+			RelayDescription string
+			Host             string
+		}{
+			RelayName:        config.RelayName,
+			RelayDescription: config.RelayDescription,
+			Host:             r.Host,
+		}
+		err := templates.ExecuteTemplate(w, "home.html", data)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
 }
 
 func initApp() error {
@@ -243,24 +260,6 @@ func initTemplates() error {
 		return fmt.Errorf("failed to parse templates: %w", err)
 	}
 	return nil
-}
-
-func homeHandler(w http.ResponseWriter, r *http.Request) {
-	data := struct {
-		Title            string
-		RelayName        string
-		RelayDescription string
-		Host             string
-	}{
-		Title:            "Subkey Management",
-		RelayName:        relay.Info.Name,
-		RelayDescription: relay.Info.Description,
-		Host:             r.Host,
-	}
-	err := templates.ExecuteTemplate(w, "home.html", data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
 }
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
