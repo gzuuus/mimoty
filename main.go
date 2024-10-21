@@ -1,5 +1,6 @@
 package main
 
+// mimo relay
 import (
 	"context"
 	"database/sql"
@@ -19,6 +20,7 @@ import (
 	"github.com/fasthttp/websocket"
 	"github.com/fiatjaf/eventstore/sqlite3"
 	"github.com/fiatjaf/khatru"
+	"github.com/fiatjaf/khatru/policies"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
@@ -159,7 +161,7 @@ func initApp() error {
 		return fmt.Errorf("failed to initialize databases: %w", err)
 	}
 	initCache()
-	relay = khatru.NewRelay()
+	relay = config.InitializeRelay()
 	setupRelay()
 
 	seedRelays = []string{
@@ -304,8 +306,44 @@ func setupRelay() {
 	relay.DeleteEvent = append(relay.DeleteEvent, eventDB.DeleteEvent)
 	relay.RejectEvent = append(relay.RejectEvent, validateEvent)
 
-	relay.Info.Name = "Your Relay Name"
-	relay.Info.Description = "Your Relay Description"
+	relay.RejectFilter = append(relay.RejectFilter, policies.NoComplexFilters)
+	relay.RejectConnection = append(relay.RejectConnection, policies.ConnectionRateLimiter(10, time.Minute, 100))
+}
+
+func (c *Config) InitializeRelay() *khatru.Relay {
+	relay := khatru.NewRelay()
+
+	if c.RelayName != "" {
+		relay.Info.Name = c.RelayName
+	} else {
+		relay.Info.Name = "Mimo Relay"
+	}
+
+	relay.Info.PubKey = c.RelayPubkey
+
+	if c.RelayDescription != "" {
+		relay.Info.Description = c.RelayDescription
+	} else {
+		relay.Info.Description = "A Nostr relay powered by Khatru"
+	}
+
+	relay.Info.Software = "https://github.com/gzuuus/mimo-relay"
+
+	relay.Info.Version = "0.1.0"
+
+	if c.RelayContact != "" {
+		relay.Info.Contact = c.RelayContact
+	} else {
+		relay.Info.Contact = "operator@" + c.RelayDomain
+	}
+
+	relay.Info.SupportedNIPs = []int{1, 2, 4, 9, 11, 12, 15, 16, 20, 22, 28, 33, 40}
+
+	if c.RelayIcon != "" {
+		relay.Info.Icon = c.RelayIcon
+	}
+
+	return relay
 }
 
 func storeEvent(ctx context.Context, event *nostr.Event) error {
