@@ -21,7 +21,6 @@ import (
 	"github.com/fiatjaf/eventstore/sqlite3"
 	"github.com/fiatjaf/khatru"
 	"github.com/fiatjaf/khatru/policies"
-	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/nbd-wtf/go-nostr"
@@ -93,35 +92,51 @@ func main() {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 
-	r := setupRoutes()
+	mux := setupHTTPHandlers(relay)
 
 	addr := fmt.Sprintf(":%s", config.Port)
 	log.Printf("Starting server on %s", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func setupRoutes() *mux.Router {
-	r := mux.NewRouter()
-	r.HandleFunc("/", rootHandler).Methods("GET")
-	r.HandleFunc("/api/login", authMiddleware(LoginHandler)).Methods("POST")
-	r.HandleFunc("/api/subkeys", authMiddleware(GetSubkeysHandler)).Methods("GET")
-	r.HandleFunc("/api/subkey", authMiddleware(AddSubkeyHandler)).Methods("POST")
-	r.HandleFunc("/api/subkey/{pubkey}", authMiddleware(DeleteSubkeyHandler)).Methods("DELETE")
-	r.HandleFunc("/api/subkeys/delete", authMiddleware(DeleteMultipleSubkeysHandler)).Methods("POST")
-	r.HandleFunc("/api/subkey/{pubkey}/kinds", authMiddleware(UpdateSubkeyKindsHandler)).Methods("PUT")
-	r.HandleFunc("/api/subkey/{pubkey}/name", authMiddleware(UpdateSubkeyNameHandler)).Methods("PUT")
-	r.HandleFunc("/api/subkey/generate", authMiddleware(GenerateSubkeyHandler)).Methods("POST")
+func setupHTTPHandlers(relay *khatru.Relay) *http.ServeMux {
+	mux := http.NewServeMux()
 
-	return r
-}
-func rootHandler(w http.ResponseWriter, r *http.Request) {
-	if websocket.IsWebSocketUpgrade(r) {
-		relay.ServeHTTP(w, r)
-	} else {
-		homeHandler(w, r)
-	}
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if websocket.IsWebSocketUpgrade(r) {
+			relay.ServeHTTP(w, r)
+		} else if r.URL.Path == "/" {
+			homeHandler(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	mux.HandleFunc("/api/login", authMiddleware(LoginHandler))
+	mux.HandleFunc("/api/subkeys", authMiddleware(GetSubkeysHandler))
+	mux.HandleFunc("/api/subkey", authMiddleware(AddSubkeyHandler))
+	mux.HandleFunc("/api/subkey/", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodDelete:
+			DeleteSubkeyHandler(w, r)
+		case http.MethodPut:
+			if strings.HasSuffix(r.URL.Path, "/kinds") {
+				UpdateSubkeyKindsHandler(w, r)
+			} else if strings.HasSuffix(r.URL.Path, "/name") {
+				UpdateSubkeyNameHandler(w, r)
+			} else {
+				http.NotFound(w, r)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	mux.HandleFunc("/api/subkeys/delete", authMiddleware(DeleteMultipleSubkeysHandler))
+	mux.HandleFunc("/api/subkey/generate", authMiddleware(GenerateSubkeyHandler))
+
+	return mux
 }
 
 func initApp() error {
