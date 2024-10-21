@@ -358,15 +358,17 @@ func validateEvent(ctx context.Context, event *nostr.Event) (bool, string) {
 	return true, "event not allowed: pubkey not in trust network"
 }
 func isValidSubkeyEvent(event *nostr.Event) bool {
-	// FIXME: Getting error from cache `Invalid cache entry for pubkey`
-
 	if cached, found := subkeyCache.Get(event.PubKey); found {
-		allowedKinds, ok := cached.([]int)
-		if !ok {
-			log.Printf("Invalid cache entry for pubkey %s", event.PubKey)
-			return false
+		switch allowedKinds := cached.(type) {
+		case []int:
+			return contains(allowedKinds, event.Kind)
+		case string:
+			parsedKinds := parseAllowedKinds(allowedKinds)
+			subkeyCache.Set(event.PubKey, parsedKinds, 1)
+			return contains(parsedKinds, event.Kind)
+		default:
+			log.Printf("Invalid cache entry type for pubkey %s: %T", event.PubKey, cached)
 		}
-		return contains(allowedKinds, event.Kind)
 	}
 
 	var allowedKindsStr string
@@ -475,6 +477,7 @@ func SyncEventWithSubkey(ctx context.Context, event *nostr.Event, pubkey, privke
 		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
 			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
 		}
+		go rebroadcastEvent(resignedEvent)
 	case 3:
 		var filteredTags nostr.Tags
 		mimoFound := false
@@ -506,6 +509,8 @@ func SyncEventWithSubkey(ctx context.Context, event *nostr.Event, pubkey, privke
 		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
 			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
 		}
+		go rebroadcastEvent(resignedEvent)
+
 	case 10002:
 		var filteredTags nostr.Tags
 		mimoPubkeyFound := false
@@ -532,22 +537,25 @@ func SyncEventWithSubkey(ctx context.Context, event *nostr.Event, pubkey, privke
 		if err := eventDB.SaveEvent(ctx, resignedEvent); err != nil {
 			return fmt.Errorf("failed to save synced metadata event for subkey %s: %w", pubkey, err)
 		}
+		go rebroadcastEvent(resignedEvent)
 	}
 
 	return nil
 }
 
-// func rebroadcastEvent(event *nostr.Event) {
-// 	for _, url := range rebroadcastRelays {
-// 		relay, err := nostr.RelayConnect(context.Background(), url)
-// 		if err != nil {
-// 			log.Printf("Failed to connect to relay %s: %v", url, err)
-// 			continue
-// 		}
-// 		defer relay.Close()
+func rebroadcastEvent(event *nostr.Event) {
+	log.Println("Rebroadcasting event", event.Kind)
+	for _, url := range seedRelays {
+		relay, err := nostr.RelayConnect(context.Background(), url)
+		if err != nil {
+			log.Printf("Failed to connect to relay %s: %v", url, err)
+			continue
+		}
+		defer relay.Close()
 
-// 		if err := relay.Publish(context.Background(), *event); err != nil {
-// 			log.Printf("Failed to publish event to relay %s: %v", url, err)
-// 		}
-// 	}
-// }
+		if err := relay.Publish(context.Background(), *event); err != nil {
+			log.Printf("Failed to publish event to relay %s: %v", url, err)
+			continue
+		}
+	}
+}
