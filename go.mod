@@ -10,6 +10,7 @@ require (
 	github.com/fiatjaf/khatru v0.8.3
 	github.com/gorilla/mux v1.8.1
 	github.com/joho/godotenv v1.5.1
+	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/nbd-wtf/go-nostr v0.38.2
 	github.com/stretchr/testify v1.9.0

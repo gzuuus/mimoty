@@ -10,7 +10,6 @@ import (
 	"html/template"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,7 +19,7 @@ import (
 	"github.com/fiatjaf/eventstore/sqlite3"
 	"github.com/fiatjaf/khatru"
 	"github.com/fiatjaf/khatru/policies"
-	"github.com/joho/godotenv"
+	"github.com/kelseyhightower/envconfig"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -40,18 +39,44 @@ var (
 )
 
 type Config struct {
-	Port             string
-	RelayName        string
-	RelayPubkey      string
-	RelayPrivateKey  string
-	RelayDescription string
-	RelayIcon        string
-	RelayContact     string
-	RelayDomain      string
-	EventsDBPath     string
-	SubkeysDBPath    string
-	RefreshInterval  int
-	MaxHops          int
+	// Server config
+	Port    string `envconfig:"PORT" default:"3334"`
+	LogFile string `envconfig:"LOG_FILE"`
+	// FIXME: the configuration is not beign loaded properly
+	// Relay metadata
+	RelayName        string `envconfig:"RELAY_NAME" required:"true" default:"mimo"`
+	RelayPrivateKey  string `envconfig:"ROOT_PRIVATE_KEY" required:"true"`
+	RelayDescription string `envconfig:"RELAY_DESCRIPTION"`
+	RelayIcon        string `envconfig:"RELAY_ICON"`
+	RelayContact     string `envconfig:"RELAY_CONTACT"`
+	RelayDomain      string `envconfig:"RELAY_DOMAIN" required:"true"`
+
+	// Database paths
+	EventsDBPath  string `envconfig:"EV_DB_PATH" default:"event.db"`
+	SubkeysDBPath string `envconfig:"SUBKEYS_DB_PATH" default:"subkeys.db"`
+
+	// Network settings
+	RefreshInterval time.Duration `envconfig:"REFRESH_INTERVAL" default:"2h"`
+	MaxHops         int           `envconfig:"MAX_HOPS" default:"2"`
+
+	// Computed fields (not from env)
+	RelayPubkey string
+}
+
+type SubkeyManager struct {
+	db          *sql.DB
+	cache       *ristretto.Cache
+	rootPubkey  string
+	rootPrivkey string
+}
+
+type Subkey struct {
+	Pubkey       string
+	Privkey      string
+	Name         string
+	AllowedKinds []int
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 type ValidationResult struct {
@@ -61,29 +86,20 @@ type ValidationResult struct {
 	Reason       string
 }
 
-func LoadConfig() Config {
-	return Config{
-		Port:             os.Getenv("PORT"),
-		RelayName:        os.Getenv("RELAY_NAME"),
-		RelayPrivateKey:  os.Getenv("ROOT_PRIVATE_KEY"),
-		RelayDescription: os.Getenv("RELAY_DESCRIPTION"),
-		RelayIcon:        os.Getenv("RELAY_ICON"),
-		RelayContact:     os.Getenv("RELAY_CONTACT"),
-		RelayDomain:      os.Getenv("RELAY_DOMAIN"),
-		EventsDBPath:     os.Getenv("EV_DB_PATH"),
-		SubkeysDBPath:    os.Getenv("SUBKEYS_DB_PATH"),
-		RefreshInterval:  getEnvAsInt("REFRESH_INTERVAL_HOURS", 2),
-		MaxHops:          getEnvAsInt("MAX_HOPS", 2),
+func LoadConfig() (*Config, error) {
+	var cfg Config
+	if err := envconfig.Process("", &cfg); err != nil {
+		return nil, fmt.Errorf("error processing config: %w", err)
 	}
-}
 
-func getEnvAsInt(key string, defaultVal int) int {
-	if value, exists := os.LookupEnv(key); exists {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
-		}
+	// Validate and compute derived fields
+	pubkey, err := nostr.GetPublicKey(cfg.RelayPrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid relay private key: %w", err)
 	}
-	return defaultVal
+	cfg.RelayPubkey = pubkey
+
+	return &cfg, nil
 }
 
 func main() {
@@ -175,56 +191,34 @@ func createHomeHandler(config *Config) http.HandlerFunc {
 }
 
 func initApp() error {
-	if err := godotenv.Load(); err != nil {
-		return fmt.Errorf("error loading .env file: %w", err)
+	// Load configuration
+	cfg, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
 	}
+	config = *cfg // Update global config
 
-	config = LoadConfig()
-
-	if err := validateConfig(&config); err != nil {
-		return err
-	}
-
-	if config.EventsDBPath == "" {
-		config.EventsDBPath = "event.db"
-	}
-	if config.SubkeysDBPath == "" {
-		config.SubkeysDBPath = "subkeys.db"
-	}
-
+	// Initialize databases
 	if err := InitDatabases(); err != nil {
 		return fmt.Errorf("failed to initialize databases: %w", err)
 	}
 
+	// Initialize caches
 	if err := initCache(); err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
-	if err := loadSubkeysIntoCache(); err != nil {
-		return fmt.Errorf("failed to load subkeys into cache: %w", err)
+
+	// Initialize subkey manager
+	subkeyMgr, err := NewSubkeyManager(subkeyDB, subkeyCache, config.RelayPrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to initialize subkey manager: %w", err)
 	}
 
+	// Initialize relay
 	relay = initializeRelay(&config)
-	setupRelay(relay)
+	setupRelay(relay, subkeyMgr)
 
-	seedRelays = []string{
-		"wss://nos.lol",
-		"wss://nostr.mom",
-		"wss://purplepag.es",
-		"wss://purplerelay.com",
-		"wss://relay.damus.io",
-		"wss://relay.nostr.band",
-		"wss://relay.snort.social",
-		"wss://relay.primal.net",
-		"wss://relay.nostr.bg",
-		"wss://no.str.cr",
-		"wss://nostr21.com",
-		"wss://nostrue.com",
-		"wss://relay.siamstr.com",
-	}
-
-	ctx := context.Background()
-	pool = nostr.NewSimplePool(ctx)
-
+	// Initialize templates and other components
 	if err := initTemplates(); err != nil {
 		return fmt.Errorf("failed to initialize templates: %w", err)
 	}
@@ -232,48 +226,27 @@ func initApp() error {
 	return nil
 }
 
-func loadSubkeysIntoCache() error {
-	rows, err := subkeyDB.Query("SELECT pubkey, allowed_kinds FROM subkeys")
-	if err != nil {
-		return fmt.Errorf("failed to fetch subkeys: %w", err)
-	}
-	defer rows.Close()
+// func validateConfig(config *Config) error {
+// 	if config.RelayPrivateKey == "" {
+// 		return fmt.Errorf("ROOT_PRIVATE_KEY not set in environment")
+// 	}
 
-	for rows.Next() {
-		var pubkey, allowedKindsStr string
-		if err := rows.Scan(&pubkey, &allowedKindsStr); err != nil {
-			log.Printf("Failed to scan subkey: %v", err)
-			continue
-		}
+// 	if config.RelayDomain == "" {
+// 		return fmt.Errorf("RELAY_DOMAIN not set in environment")
+// 	}
 
-		allowedKinds := parseAllowedKinds(allowedKindsStr)
-		subkeyCache.Set(pubkey, allowedKinds, 1)
-	}
+// 	if config.Port == "" {
+// 		config.Port = "3334"
+// 	}
 
-	return nil
-}
+// 	var err error
+// 	config.RelayPubkey, err = nostr.GetPublicKey(config.RelayPrivateKey)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to get root public key: %w", err)
+// 	}
 
-func validateConfig(config *Config) error {
-	if config.RelayPrivateKey == "" {
-		return fmt.Errorf("ROOT_PRIVATE_KEY not set in environment")
-	}
-
-	if config.RelayDomain == "" {
-		return fmt.Errorf("RELAY_DOMAIN not set in environment")
-	}
-
-	if config.Port == "" {
-		config.Port = "3334"
-	}
-
-	var err error
-	config.RelayPubkey, err = nostr.GetPublicKey(config.RelayPrivateKey)
-	if err != nil {
-		return fmt.Errorf("failed to get root public key: %w", err)
-	}
-
-	return nil
-}
+// 	return nil
+// }
 
 func initCache() error {
 	var err error
@@ -366,20 +339,39 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func setupRelay(relay *khatru.Relay) {
-	relay.StoreEvent = append(relay.StoreEvent, storeEvent)
+func setupRelay(relay *khatru.Relay, subkeyMgr *SubkeyManager) {
+	relay.StoreEvent = append(relay.StoreEvent, func(ctx context.Context, event *nostr.Event) error {
+		if subkeyMgr.IsValidSubkeyEvent(event) {
+			resignedEvent, err := subkeyMgr.ResignEvent(event)
+			if err != nil {
+				return fmt.Errorf("failed to resign event: %w", err)
+			}
+			event = resignedEvent
+		}
+
+		if err := eventDB.SaveEvent(ctx, event); err != nil {
+			return fmt.Errorf("failed to save event: %w", err)
+		}
+
+		relay.BroadcastEvent(event)
+		return nil
+	})
+
 	relay.QueryEvents = append(relay.QueryEvents, eventDB.QueryEvents)
 	relay.DeleteEvent = append(relay.DeleteEvent, eventDB.DeleteEvent)
 	relay.RejectEvent = append(relay.RejectEvent, validateEvent)
 
+	// Add rate limiting and other policies
 	relay.RejectFilter = append(relay.RejectFilter,
 		policies.NoEmptyFilters,
+		policies.NoComplexFilters,
 	)
 
 	relay.RejectConnection = append(relay.RejectConnection,
 		policies.ConnectionRateLimiter(10, time.Minute*2, 30),
 	)
 
+	// Add logging hooks
 	relay.OnConnect = append(relay.OnConnect, func(ctx context.Context) {
 		log.Printf("New WebSocket connection established")
 	})
@@ -514,7 +506,6 @@ func resignEventWithSubkey(event *nostr.Event, pubkey, privkey string) (*nostr.E
 		return nil, fmt.Errorf("failed to sign event: %w", err)
 	}
 
-	// FIXME: Event id and sig are not valid?
 	fmt.Println("Checking id", resignedEvent.CheckID())
 	if value, err := resignedEvent.CheckSignature(); err != nil {
 		return nil, fmt.Errorf("failed to check sig: %w", err)
@@ -643,4 +634,84 @@ func rebroadcastEvent(event *nostr.Event) {
 			continue
 		}
 	}
+}
+
+func NewSubkeyManager(db *sql.DB, cache *ristretto.Cache, rootPrivkey string) (*SubkeyManager, error) {
+	rootPubkey, err := nostr.GetPublicKey(rootPrivkey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid root private key: %w", err)
+	}
+
+	return &SubkeyManager{
+		db:          db,
+		cache:       cache,
+		rootPubkey:  rootPubkey,
+		rootPrivkey: rootPrivkey,
+	}, nil
+}
+
+func (sm *SubkeyManager) AddSubkey(ctx context.Context, privkey, name, allowedKinds string) (*Subkey, error) {
+	pubkey, err := nostr.GetPublicKey(privkey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key: %w", err)
+	}
+
+	now := time.Now()
+	_, err = sm.db.ExecContext(ctx,
+		`INSERT INTO subkeys (pubkey, privkey, name, allowed_kinds, created_at, updated_at) 
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		pubkey, privkey, name, allowedKinds, now.Unix(), now.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert subkey: %w", err)
+	}
+
+	kinds := parseAllowedKinds(allowedKinds)
+	sm.cache.Set(pubkey, kinds, 1)
+
+	return &Subkey{
+		Pubkey:       pubkey,
+		Privkey:      privkey,
+		Name:         name,
+		AllowedKinds: kinds,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}, nil
+}
+
+func (sm *SubkeyManager) IsValidSubkeyEvent(event *nostr.Event) bool {
+	if cached, found := sm.cache.Get(event.PubKey); found {
+		allowedKinds, ok := cached.([]int)
+		if !ok {
+			log.Printf("Invalid cache entry type for pubkey %s: %T", event.PubKey, cached)
+			return false
+		}
+		return contains(allowedKinds, event.Kind)
+	}
+
+	var allowedKindsStr string
+	err := sm.db.QueryRow("SELECT allowed_kinds FROM subkeys WHERE pubkey = ?", event.PubKey).
+		Scan(&allowedKindsStr)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("Error querying subkey for pubkey %s: %v", event.PubKey, err)
+		}
+		return false
+	}
+
+	allowedKinds := parseAllowedKinds(allowedKindsStr)
+	sm.cache.Set(event.PubKey, allowedKinds, 1)
+
+	return contains(allowedKinds, event.Kind)
+}
+
+func (sm *SubkeyManager) ResignEvent(event *nostr.Event) (*nostr.Event, error) {
+	resignedEvent := *event
+	resignedEvent.PubKey = sm.rootPubkey
+	resignedEvent.CreatedAt = nostr.Timestamp(time.Now().Unix())
+
+	if err := resignedEvent.Sign(sm.rootPrivkey); err != nil {
+		return nil, fmt.Errorf("failed to sign event: %w", err)
+	}
+
+	return &resignedEvent, nil
 }
